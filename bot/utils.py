@@ -1,13 +1,28 @@
-"""Утилиты: экранирование Markdown, нарезка длинных сообщений."""
+"""Утилиты: экранирование MarkdownV2, нарезка длинных сообщений."""
+
+# Полный набор спецсимволов MarkdownV2 (по docs.telegram.org):
+#   _ * [ ] ( ) ~ ` > # + - = | { } . !
+_MD_V2_SPECIALS = "\\_*[]()~`>#+-=|{}.!"
 
 
 def esc_md(text):
-    """Экранирует спецсимволы Markdown, чтобы пользовательский текст не ломал разметку."""
+    """Экранирует спецсимволы MarkdownV2, чтобы пользовательский текст не ломал разметку."""
     if not text:
         return ""
-    for ch in ("\\", "*", "_", "`", "["):
-        text = text.replace(ch, "\\" + ch)
-    return text
+    out = []
+    for ch in text:
+        if ch in _MD_V2_SPECIALS:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def md_link(title, url):
+    """Ссылка MarkdownV2: URL экранируется по правилам «внутри ссылки»
+    (спецсимволы \\ ( ) экранируются, остальные — в том числе '.', '=' — нет)."""
+    safe_url = url.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return f"[{esc_md(title)}]({safe_url})"
 
 
 def split_message(text, max_len=4000):
