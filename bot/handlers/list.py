@@ -1,35 +1,15 @@
 """Хендлер команды /list — нумерованный список персонажей.
 
-Использует MarkdownV2: esc_md() экранирует ВСЕ спецсимволы v2, а md_link()
-строит корректные ссылки. Классический Markdown (v1) ломался на именах с
-"_", "[", "-" и т.п. (Telegram возвращал BadRequest, бот писал
-"Не удалось загрузить список").
+Решение: обычный ТЕКСТ без parse_mode. Данные из форума (имена, позывные)
+содержат слишком много спецсимволов (* _ [ ] . - = и т.д.), которые ломают
+и Markdown, и MarkdownV2 — Telegram отвечал BadRequest, и бот писал
+"Не удалось загрузить список". Ссылки в текстовом сообщении Telegram
+автоматически делает кликабельными сам.
 """
 
 from bot.config import logger
 from bot.cache import ensure_cache, get_numbered_list, characters_cache
-from bot.utils import esc_md, md_link, split_message
-
-
-async def _send(update, sm, text, first=False):
-    """Отправляет часть списка; при любой ошибке — фолбэк обычным текстом."""
-    try:
-        if first:
-            await sm.edit_text(text, parse_mode="MarkdownV2", disable_web_page_preview=True)
-        else:
-            await update.message.reply_text(
-                text, parse_mode="MarkdownV2", disable_web_page_preview=True
-            )
-    except Exception as e:
-        logger.warning(f"MarkdownV2 не принят ({e}), отправляю обычным текстом")
-        plain = text.replace("\\", "")
-        try:
-            if first:
-                await sm.edit_text(plain, disable_web_page_preview=True)
-            else:
-                await update.message.reply_text(plain, disable_web_page_preview=True)
-        except Exception as e2:
-            logger.error(f"Фолбэк-отправка тоже не удалась: {e2}")
+from bot.utils import split_message
 
 
 async def list_cmd(update, ctx):
@@ -40,17 +20,21 @@ async def list_cmd(update, ctx):
             await sm.edit_text("❌ Не удалось загрузить список.")
             return
         ordered = get_numbered_list()
-        L = [f"📋 *Персонажи \\({len(ordered)}\\):*"]
-        L.append("*№ | Имя Фамилия | Позывной | Ссылка*")
+        L = [f"📋 Персонажи ({len(ordered)}):\n",
+             "№ | Имя Фамилия | Позывной | Ссылка"]
         for i, c in enumerate(ordered, 1):
-            n = esc_md(c.get("name", "?"))
-            mon = esc_md(c.get("moniker", "")) or "—"
-            link = md_link("анкета", c.get("topic_url", ""))
-            L.append(f"{i}\\. {n} | {mon} | {link}")
+            name = c.get("name", "?")
+            mon = c.get("moniker", "") or "—"
+            url = c.get("topic_url", "")
+            L.append(f"{i}. {name} | {mon}")
+            L.append(f"   🔗 {url}")
         msg = "\n".join(L)
         parts = split_message(msg, max_len=3900)
         for i, p in enumerate(parts):
-            await _send(update, sm, p, first=(i == 0))
+            if i == 0:
+                await sm.edit_text(p, disable_web_page_preview=True)
+            else:
+                await update.message.reply_text(p, disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"List error: {e}", exc_info=True)
         try:
