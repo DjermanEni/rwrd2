@@ -29,7 +29,12 @@ async def _get(url, referer=None):
 # ---------- Список тем раздела ----------
 
 def _extract_topic_links(soup_text):
-    """Разбирает страницу viewforum: возвращает (topics, has_next_page)."""
+    """Разбирает страницу viewforum: возвращает (topics, has_next_page).
+
+    Ищем таблицу с темами несколькими способами (вёрстка PunBB-форумов
+    может отличаться): summary «Список тем», таблица внутри div.forum,
+    затем — любая таблица, где есть ссылки на viewtopic.php?id=N.
+    """
     topics = []
     soup = BeautifulSoup(soup_text, "html.parser")
     topic_table = soup.find("table", attrs={"summary": re.compile(r"Список тем")})
@@ -37,6 +42,25 @@ def _extract_topic_links(soup_text):
         forum_div = soup.find("div", class_="forum")
         if forum_div:
             topic_table = forum_div.find("table")
+    if not topic_table:
+        # запасной вариант: таблица с наибольшим числом разных тем
+        # (заголовок «Тема» — PunBB/FluxBB; иначе берём таблицу, где больше
+        #  всех ссылок на viewtopic, чтобы не схватить блок «Кто онлайн»)
+        best, best_score = None, 0
+        for tbl in soup.find_all("table"):
+            header = bool(tbl.find(string=re.compile(r"^\s*Тема\s*$")))
+            ids = set()
+            for a in tbl.find_all("a", href=re.compile(r"viewtopic\.php\?id=\d+")):
+                h = a.get("href", "")
+                if "#p" not in h:
+                    m = re.search(r"id=(\d+)", h)
+                    if m:
+                        ids.add(m.group(1))
+            score = len(ids) + (1000 if header else 0)
+            if score > best_score:
+                best, best_score = tbl, score
+        if best is not None and best_score > 0:
+            topic_table = best
 
     def make_topic(tid, title, author):
         ym = re.search(r'\[(\d{4}(?:\s*/\s*\d{4})?)\]', title)
@@ -64,6 +88,7 @@ def _extract_topic_links(soup_text):
             topics.append(make_topic(tid, title, "Unknown"))
         return topics, False
 
+    seen_ids_row = set()
     found = False
     for row in topic_table.find_all("tr"):
         link = row.find("a", href=re.compile(r"viewtopic\.php\?id=\d+"))
@@ -77,8 +102,9 @@ def _extract_topic_links(soup_text):
             continue
         tid = m.group(1)
         title = link.get_text(strip=True)
-        if len(title) < 3:
+        if len(title) < 3 or tid in seen_ids_row:
             continue
+        seen_ids_row.add(tid)
         au = row.find("span", class_="byuser-username")
         author = au.get_text(strip=True) if au else "Unknown"
         topics.append(make_topic(tid, title, author))
