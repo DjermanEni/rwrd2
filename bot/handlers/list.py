@@ -1,26 +1,35 @@
-"""Хендлер команды /list — нумерованный список персонажей."""
+"""Хендлер команды /list — нумерованный список персонажей.
 
-from telegram.error import BadRequest
+Использует MarkdownV2: esc_md() экранирует ВСЕ спецсимволы v2, а md_link()
+строит корректные ссылки. Классический Markdown (v1) ломался на именах с
+"_", "[", "-" и т.п. (Telegram возвращал BadRequest, бот писал
+"Не удалось загрузить список").
+"""
 
 from bot.config import logger
 from bot.cache import ensure_cache, get_numbered_list, characters_cache
-from bot.utils import esc_md, split_message
+from bot.utils import esc_md, md_link, split_message
 
 
-async def _send_md(update, sm, text, first=False):
-    """Отправляет текст с Markdown; при ошибке парсинга повторяет без разметки."""
-    plain = text.replace("\\", "")
+async def _send(update, sm, text, first=False):
+    """Отправляет часть списка; при любой ошибке — фолбэк обычным текстом."""
     try:
         if first:
-            await sm.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+            await sm.edit_text(text, parse_mode="MarkdownV2", disable_web_page_preview=True)
         else:
-            await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
-    except BadRequest as e:
-        logger.warning(f"Markdown не принят ({e}), отправляю без разметки")
-        if first:
-            await sm.edit_text(plain, disable_web_page_preview=True)
-        else:
-            await update.message.reply_text(plain, disable_web_page_preview=True)
+            await update.message.reply_text(
+                text, parse_mode="MarkdownV2", disable_web_page_preview=True
+            )
+    except Exception as e:
+        logger.warning(f"MarkdownV2 не принят ({e}), отправляю обычным текстом")
+        plain = text.replace("\\", "")
+        try:
+            if first:
+                await sm.edit_text(plain, disable_web_page_preview=True)
+            else:
+                await update.message.reply_text(plain, disable_web_page_preview=True)
+        except Exception as e2:
+            logger.error(f"Фолбэк-отправка тоже не удалась: {e2}")
 
 
 async def list_cmd(update, ctx):
@@ -31,18 +40,20 @@ async def list_cmd(update, ctx):
             await sm.edit_text("❌ Не удалось загрузить список.")
             return
         ordered = get_numbered_list()
-        L = [f"📋 *Персонажи ({len(ordered)}):*\n"]
+        L = [f"📋 *Персонажи \\({len(ordered)}\\):*"]
         L.append("*№ | Имя Фамилия | Позывной | Ссылка*")
         for i, c in enumerate(ordered, 1):
             n = esc_md(c.get("name", "?"))
             mon = esc_md(c.get("moniker", "")) or "—"
-            url = c.get("topic_url", "")
-            line = f"{i}. {n} | {mon} | [анкета]({url})"
-            L.append(line)
+            link = md_link("анкета", c.get("topic_url", ""))
+            L.append(f"{i}\\. {n} | {mon} | {link}")
         msg = "\n".join(L)
         parts = split_message(msg, max_len=3900)
         for i, p in enumerate(parts):
-            await _send_md(update, sm, p, first=(i == 0))
+            await _send(update, sm, p, first=(i == 0))
     except Exception as e:
-        logger.error(f"List error: {e}")
-        await sm.edit_text(f"⚠️ Ошибка: {str(e)[:200]}")
+        logger.error(f"List error: {e}", exc_info=True)
+        try:
+            await sm.edit_text(f"⚠️ Ошибка: {str(e)[:200]}")
+        except Exception:
+            pass
