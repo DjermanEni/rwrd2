@@ -15,7 +15,7 @@ async def list_cmd(update, ctx):
         ordered = get_numbered_list()
         L = [f"📋 *Персонажи ({len(ordered)}):*\n"]
         L.append("*№ | Имя Фамилия | Позывной | Ссылка*")
-        L.append("_")
+        L.append("_")   ← одиночный "_" это НЕвалидный Markdown
         for i, c in enumerate(ordered, 1):
             n = esc_md(c.get("name", "?"))
             mon = esc_md(c.get("moniker", "")) or "—"
