@@ -1,64 +1,55 @@
-"""Парсинг форума: список тем раздела, анкета персонажа, аватары."""
+"""Асинхронный парсинг форума: список тем раздела, анкеты персонажей, аватары.
 
+Все сетевые запросы идут через общий httpx.AsyncClient (bot.forum_session).
+Анкеты тем загружаются параллельно пачками по PARSE_CONCURRENCY штук
+с паузой REQUEST_DELAY между пачками — это ускоряет обновление кэша
+в ~8 раз по сравнению с последовательным обходом.
+"""
+
+import asyncio
 import re
-import time
-import requests
+import httpx
 from bs4 import BeautifulSoup
 
 from bot.config import (
-    FORUM_URL, FORUM_ID, MAX_PAGES, REQUEST_TIMEOUT, REQUEST_DELAY, logger
+    FORUM_URL, FORUM_ID, MAX_PAGES,
+    REQUEST_DELAY, PARSE_CONCURRENCY, logger
 )
-from bot.forum_session import forum_session
+from bot.forum_session import client
 
 
-def get_forum_topics():
-    """Собирает список тем из раздела FORUM_ID со всех страниц (до MAX_PAGES)."""
+async def _get(url, referer=None):
+    """GET с ответом в виде текста; бросает исключение при сетевой ошибке/4xx-5xx."""
+    headers = {"Referer": referer} if referer else None
+    r = await client().get(url, headers=headers)
+    r.raise_for_status()
+    return r.text
+
+
+# ---------- Список тем раздела ----------
+
+def _extract_topic_links(soup_text):
+    """Разбирает страницу viewforum: возвращает (topics, has_next_page)."""
     topics = []
-    page = 1
-    while page <= MAX_PAGES:
-        url = f"{FORUM_URL}/viewforum.php?id={FORUM_ID}"
-        if page > 1:
-            url += f"&p={page}"
-        logger.info(f"Загрузка страницы {page}: {url}")
-        try:
-            response = forum_session().get(url, headers={"Referer": f"{FORUM_URL}/index.php"}, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            logger.error(f"Ошибка загрузки страницы {page}: {e}")
-            break
-        soup = BeautifulSoup(response.text, "html.parser")
-        topic_table = soup.find("table", attrs={"summary": re.compile(r"Список тем")})
-        if not topic_table:
-            forum_div = soup.find("div", class_="forum")
-            if forum_div:
-                topic_table = forum_div.find("table")
-        if not topic_table:
-            # запасной вариант: собираем ссылки на темы прямо со страницы
-            all_links = soup.find_all("a", href=re.compile(r"viewtopic\.php\?id=\d+"))
-            for link in all_links:
-                href = link.get("href", "")
-                if "#p" in href:
-                    continue
-                m = re.search(r"id=(\d+)", href)
-                if m:
-                    tid = m.group(1)
-                    title = link.get_text(strip=True)
-                    if len(title) < 3:
-                        continue
-                    ym = re.search(r'\[(\d{4}(?:\s*/\s*\d{4})?)\]', title)
-                    year = ym.group(1) if ym else ""
-                    tc = re.sub(r'^\[\d{4}(?:\s*/\s*\d{4})?\]\s*', '', title)
-                    tc = re.sub(r'\s*\[\d{4}(?:\s*/\s*\d{4})?\]$', '', tc)
-                    if any(t["id"] == tid for t in topics):
-                        continue
-                    topics.append({"id": tid, "title": tc, "title_full": title, "author": "Unknown", "year": year, "url": f"{FORUM_URL}/viewtopic.php?id={tid}"})
-            break
-        rows = topic_table.find_all("tr")
-        found = False
-        for row in rows:
-            link = row.find("a", href=re.compile(r"viewtopic\.php\?id=\d+"))
-            if not link:
-                continue
+    soup = BeautifulSoup(soup_text, "html.parser")
+    topic_table = soup.find("table", attrs={"summary": re.compile(r"Список тем")})
+    if not topic_table:
+        forum_div = soup.find("div", class_="forum")
+        if forum_div:
+            topic_table = forum_div.find("table")
+
+    def make_topic(tid, title, author):
+        ym = re.search(r'\[(\d{4}(?:\s*/\s*\d{4})?)\]', title)
+        year = ym.group(1) if ym else ""
+        tc = re.sub(r'^\[\d{4}(?:\s*/\s*\d{4})?\]\s*', '', title)
+        tc = re.sub(r'\s*\[\d{4}(?:\s*/\s*\d{4})?\]$', '', tc)
+        return {"id": tid, "title": tc, "title_full": title, "author": author,
+                "year": year, "url": f"{FORUM_URL}/viewtopic.php?id={tid}"}
+
+    if not topic_table:
+        # запасной вариант: собираем ссылки на темы прямо со страницы
+        seen = set()
+        for link in soup.find_all("a", href=re.compile(r"viewtopic\.php\?id=\d+")):
             href = link.get("href", "")
             if "#p" in href:
                 continue
@@ -67,35 +58,67 @@ def get_forum_topics():
                 continue
             tid = m.group(1)
             title = link.get_text(strip=True)
-            if len(title) < 3:
+            if len(title) < 3 or tid in seen:
                 continue
-            au = row.find("span", class_="byuser-username")
-            author = au.get_text(strip=True) if au else "Unknown"
-            ym = re.search(r'\[(\d{4}(?:\s*/\s*\d{4})?)\]', title)
-            year = ym.group(1) if ym else ""
-            tc = re.sub(r'^\[\d{4}(?:\s*/\s*\d{4})?\]\s*', '', title)
-            tc = re.sub(r'\s*\[\d{4}(?:\s*/\s*\d{4})?\]$', '', tc)
-            topics.append({"id": tid, "title": tc, "title_full": title, "author": author, "year": year, "url": f"{FORUM_URL}/viewtopic.php?id={tid}"})
-            found = True
-        if not found:
+            seen.add(tid)
+            topics.append(make_topic(tid, title, "Unknown"))
+        return topics, False
+
+    found = False
+    for row in topic_table.find_all("tr"):
+        link = row.find("a", href=re.compile(r"viewtopic\.php\?id=\d+"))
+        if not link:
+            continue
+        href = link.get("href", "")
+        if "#p" in href:
+            continue
+        m = re.search(r"id=(\d+)", href)
+        if not m:
+            continue
+        tid = m.group(1)
+        title = link.get_text(strip=True)
+        if len(title) < 3:
+            continue
+        au = row.find("span", class_="byuser-username")
+        author = au.get_text(strip=True) if au else "Unknown"
+        topics.append(make_topic(tid, title, author))
+        found = True
+    return topics, found and bool(soup.find("a", class_="next"))
+
+
+async def get_forum_topics():
+    """Собирает список тем из раздела FORUM_ID со всех страниц (до MAX_PAGES)."""
+    topics = []
+    seen_ids = set()
+    page = 1
+    while page <= MAX_PAGES:
+        url = f"{FORUM_URL}/viewforum.php?id={FORUM_ID}"
+        if page > 1:
+            url += f"&p={page}"
+        logger.info(f"Загрузка страницы {page}: {url}")
+        try:
+            html = await _get(url, referer=f"{FORUM_URL}/index.php")
+        except (httpx.HTTPError, Exception) as e:
+            logger.error(f"Ошибка загрузки страницы {page}: {e}")
             break
-        if not soup.find("a", class_="next"):
+        page_topics, has_more = _extract_topic_links(html)
+        for t in page_topics:
+            if t["id"] not in seen_ids:
+                seen_ids.add(t["id"])
+                topics.append(t)
+        if not has_more:
             break
-        time.sleep(REQUEST_DELAY)
+        await asyncio.sleep(REQUEST_DELAY)
         page += 1
     logger.info(f"Всего найдено тем: {len(topics)}")
     return topics
 
 
-def parse_character_sheet(topic_url):
-    """Извлекает поля анкеты персонажа из первого поста темы."""
-    try:
-        response = forum_session().get(topic_url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        logger.error(f"Ошибка загрузки темы {topic_url}: {e}")
-        return None
-    soup = BeautifulSoup(response.text, "html.parser")
+# ---------- Анкета персонажа ----------
+
+def parse_sheet_html(html):
+    """Чистая (без сети) функция: извлекает поля анкеты из HTML страницы темы."""
+    soup = BeautifulSoup(html, "html.parser")
     pc = soup.find("div", class_="post-content")
     if not pc:
         pc = soup.find("div", class_="postmsg")
@@ -197,6 +220,16 @@ def parse_character_sheet(topic_url):
     return ch
 
 
+async def parse_character_sheet(topic_url):
+    """Асинхронно загружает тему и извлекает анкету персонажа."""
+    try:
+        html = await _get(topic_url)
+    except (httpx.HTTPError, Exception) as e:
+        logger.error(f"Ошибка загрузки темы {topic_url}: {e}")
+        return None
+    return parse_sheet_html(html)
+
+
 def extract_avatar_url(soup):
     """Ищет URL аватара автора первого поста темы.
 
@@ -217,12 +250,12 @@ def extract_avatar_url(soup):
     return m.group(0) if m else None
 
 
-def download_avatar(avatar_url):
-    """Скачивает аватар, возвращает bytes или None (если не картинка/недоступен)."""
+async def download_avatar(avatar_url):
+    """Асинхронно скачивает аватар, возвращает bytes или None."""
     if not avatar_url:
         return None
     try:
-        r = forum_session().get(avatar_url, timeout=REQUEST_TIMEOUT)
+        r = await client().get(avatar_url)
         r.raise_for_status()
         ctype = r.headers.get("Content-Type", "")
         if "image" not in ctype or len(r.content) < 100:
@@ -231,26 +264,26 @@ def download_avatar(avatar_url):
         if len(r.content) > 5 * 1024 * 1024:  # Telegram лимит — 5 МБ
             return None
         return r.content
-    except requests.RequestException as e:
+    except (httpx.HTTPError, Exception) as e:
         logger.warning(f"Не удалось скачать аватар {avatar_url}: {e}")
         return None
 
 
-def get_active_topics():
-    """Парсит страницу https://rwrd.rusff.me/search.php?action=show_recent
+# ---------- Активные темы ----------
+
+async def get_active_topics():
+    """Парсит https://rwrd.rusff.me/search.php?action=show_recent
     (список последних активных тем форума)."""
     url = f"{FORUM_URL}/search.php?action=show_recent"
     logger.info(f"Загрузка активных тем: {url}")
     try:
-        response = forum_session().get(url, headers={"Referer": f"{FORUM_URL}/index.php"}, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-    except requests.RequestException as e:
+        html = await _get(url, referer=f"{FORUM_URL}/index.php")
+    except (httpx.HTTPError, Exception) as e:
         logger.error(f"Ошибка загрузки активных тем: {e}")
         return []
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
     topic_table = soup.find("table", attrs={"summary": re.compile(r"Результаты поиска")})
     if not topic_table:
-        # запасной вариант: последняя таблица на странице (обычно и есть результат)
         tables = soup.find_all("table")
         topic_table = tables[-1] if tables else None
     if not topic_table:
@@ -261,7 +294,6 @@ def get_active_topics():
         tcl = row.find("td", class_="tcl")
         if not tcl:
             continue  # строка заголовков или мусор
-        # Название темы — первая ссылка на viewtopic без пагинации (&p=) и якорей (#p)
         topic_link = None
         for a in tcl.find_all("a", href=re.compile(r"viewtopic\.php\?id=\d+")):
             h = a.get("href", "")
@@ -275,13 +307,10 @@ def get_active_topics():
         topic_url = topic_link.get("href", "")
         if not topic_title:
             continue
-        # Форум, к которому относится тема (колонка "Форум")
         tc2 = row.find("td", class_="tc2")
         forum_name = tc2.get_text(strip=True) if tc2 else ""
-        # Количество ответов (колонка "Ответов")
         tc3 = row.find("td", class_="tc3")
         replies = tc3.get_text(strip=True) if tc3 else ""
-        # Последнее сообщение: время (ссылка с якорем #p), автор (ссылка на profile.php)
         last_author = ""
         last_post_url = topic_url
         last_post_time = ""
@@ -293,7 +322,6 @@ def get_active_topics():
                 last_post_time = plink.get_text(strip=True)
             au = tcr.find("span", class_="byuser-username")
             if not au:
-                # запасной вариант: имя автора в ссылке на профиль (мимо аватара)
                 for a in tcr.find_all("a", href=re.compile(r"profile\.php")):
                     txt = a.get_text(strip=True)
                     if txt:

@@ -17,12 +17,12 @@ async def char_cmd(update, ctx):
     if not q:
         await update.message.reply_text("⚠️ Имя не может быть пустым.")
         return
-    sm = await update.message.reply_text(f"🔍 Ищу: {q}...\n_(может занять до 2 мин)_", parse_mode="Markdown")
+    sm = await update.message.reply_text(f"🔍 Ищу: {q}...", parse_mode="Markdown")
     try:
-        ch = search_character(q)
+        ch = await search_character(q)
         if ch:
             msg = fmt(ch)
-            avatar = download_avatar(ch.get("avatar_url"))
+            avatar = await download_avatar(ch.get("avatar_url"))
             if avatar:
                 # подпись фото в Telegram не длиннее 1024 символов —
                 # режем карточку по этому лимиту для первой части

@@ -8,7 +8,7 @@ from bot.utils import esc_md, split_message
 async def list_cmd(update, ctx):
     sm = await update.message.reply_text("📋 Загружаю список...")
     try:
-        ensure_cache()
+        await ensure_cache()
         if not characters_cache:
             await sm.edit_text("❌ Не удалось загрузить список.")
             return

@@ -22,7 +22,10 @@ CACHE_TTL = 3600
 RECENT_TTL = 1800  # кэш активных тем (/atem) — 30 минут
 MAX_PAGES = 25
 REQUEST_TIMEOUT = 15
-REQUEST_DELAY = 0.5
+
+# Параметры асинхронного парсинга (httpx)
+PARSE_CONCURRENCY = 8   # сколько тем парсим одновременно
+REQUEST_DELAY = 0.5     # пауза между «волнами» запросов, чтобы не душить форум
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",

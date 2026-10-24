@@ -8,7 +8,7 @@ from bot.utils import esc_md
 async def atem_cmd(update, ctx):
     sm = await update.message.reply_text("🔍 Загружаю активные темы...")
     try:
-        topics = ensure_recent_cache()
+        topics = await ensure_recent_cache()
         if not topics:
             await sm.edit_text("❌ Не удалось загрузить активные темы.")
             return
