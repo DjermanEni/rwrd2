@@ -1,8 +1,26 @@
 """Хендлер команды /list — нумерованный список персонажей."""
 
+from telegram.error import BadRequest
+
 from bot.config import logger
 from bot.cache import ensure_cache, get_numbered_list, characters_cache
 from bot.utils import esc_md, split_message
+
+
+async def _send_md(update, sm, text, first=False):
+    """Отправляет текст с Markdown; при ошибке парсинга повторяет без разметки."""
+    plain = text.replace("\\", "")
+    try:
+        if first:
+            await sm.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    except BadRequest as e:
+        logger.warning(f"Markdown не принят ({e}), отправляю без разметки")
+        if first:
+            await sm.edit_text(plain, disable_web_page_preview=True)
+        else:
+            await update.message.reply_text(plain, disable_web_page_preview=True)
 
 
 async def list_cmd(update, ctx):
@@ -15,7 +33,6 @@ async def list_cmd(update, ctx):
         ordered = get_numbered_list()
         L = [f"📋 *Персонажи ({len(ordered)}):*\n"]
         L.append("*№ | Имя Фамилия | Позывной | Ссылка*")
-        L.append("_")   ← одиночный "_" это НЕвалидный Markdown
         for i, c in enumerate(ordered, 1):
             n = esc_md(c.get("name", "?"))
             mon = esc_md(c.get("moniker", "")) or "—"
@@ -25,10 +42,7 @@ async def list_cmd(update, ctx):
         msg = "\n".join(L)
         parts = split_message(msg, max_len=3900)
         for i, p in enumerate(parts):
-            if i == 0:
-                await sm.edit_text(p, parse_mode="Markdown", disable_web_page_preview=True)
-            else:
-                await update.message.reply_text(p, parse_mode="Markdown", disable_web_page_preview=True)
+            await _send_md(update, sm, p, first=(i == 0))
     except Exception as e:
         logger.error(f"List error: {e}")
         await sm.edit_text(f"⚠️ Ошибка: {str(e)[:200]}")
